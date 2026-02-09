@@ -1108,7 +1108,7 @@ const gridY = Math.round(dy / step);
 
       // Tarkista voitto
       if (checkWin()){
-        setStatus("Voitto! Punainen on EXIT-ruudussa.", "ok");
+        setStatus("Ratkaistu! Punainen on EXIT-ruudussa.", "ok");
       }else{
         setStatus(`${puzzles[current]?.name || ("Pulma " + (current+1))} (${current+1}/${puzzles.length})`, "warn");
       }
