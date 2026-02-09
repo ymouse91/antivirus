@@ -278,6 +278,57 @@
   max-width: 100%;
   box-sizing: border-box;
 }
+@media (max-width: 430px) and (orientation: portrait) and (hover:none) and (pointer:coarse){
+
+  /* Header kahteen riviin */
+  header{
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  /* Ylärivi: pelin nimi */
+  .title{
+    justify-content: center;
+  }
+
+  .title h1{
+    font-size: 18px;
+    text-align: center;
+  }
+
+  /* Alarivi: kontrollit */
+  .controls{
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  /* Pulmavalitsin kevyemmäksi */
+  #puzzleSelect{
+    min-width: 0;
+    max-width: 46vw;
+    font-size: 13px;
+    padding: 6px 8px;
+    font-weight: 700;
+  }
+
+  /* Edellinen / seuraava pienemmiksi */
+  #btnPrev,
+  #btnNext{
+    padding: 6px 8px;
+    font-size: 14px;
+  }
+
+  /* Reset & Ohjeet toissijaisiksi */
+  #btnReset,
+  #btnHelp{
+    padding: 6px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    opacity: 0.85;
+  }
+}
 
     }
   </style>
