@@ -268,11 +268,7 @@
 	  /* Estä iOS:n 100vw + safe-area -leikkaus */
 #game{
   width: 100%;
-  max-width: calc(
-    100vw
-    - env(safe-area-inset-left)
-    - env(safe-area-inset-right)
-  );
+  max-width: 100%
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -476,54 +472,59 @@
       }
     }
 
-    /* --- responsive cell size --- */
+/* --- responsive cell size --- */
 function rebuildCellSize(){
-  const wrap = elGame.getBoundingClientRect();
-
-  // Nykyiset arvot (pidetään samana)
+  // Kiinteät arvot (pidetään samana)
   const gap = 8;
   const pad = 10;
 
-  // Vain iPhone portraitissa huomioidaan header+footer,
-  // muuten käytetään samaa logiikkaa kuin ennen.
+  const appEl = document.getElementById("app");
+  if (!appEl) return;
+
+  // 1) Mitataan #app:n oikea sisätila (safe-area on paddingissa)
+  const cs = getComputedStyle(appEl);
+  const padL = parseFloat(cs.paddingLeft)  || 0;
+  const padR = parseFloat(cs.paddingRight) || 0;
+  const padT = parseFloat(cs.paddingTop)   || 0;
+  const padB = parseFloat(cs.paddingBottom)|| 0;
+
+  let availW = Math.floor(appEl.clientWidth  - padL - padR);
+  let availH = Math.floor(appEl.clientHeight - padT - padB);
+
+  // 2) iPhone portrait: vähennä header+footer (+ #app gapit) samoin kuin ennen
   const isIphonePortrait = window.matchMedia(
     "(max-width: 430px) and (orientation: portrait) and (hover:none) and (pointer:coarse)"
   ).matches;
 
-  let availW = wrap.width;
-  let availH = wrap.height;
-
   if (isIphonePortrait){
-    // Mittaa header+footer todellinen korkeus
     const headerEl = document.querySelector("#app > header");
     const footerEl = document.querySelector("#app > footer");
-
     const headerH = headerEl ? headerEl.getBoundingClientRect().height : 0;
     const footerH = footerEl ? footerEl.getBoundingClientRect().height : 0;
 
-    // #app:n grid-gap (10px tai iPhone-medialla 8px)
-    const appEl = document.getElementById("app");
-    let gridGap = 10;
-    if (appEl){
-      const cs = getComputedStyle(appEl);
-      const g = parseFloat(cs.gap);
-      if (Number.isFinite(g)) gridGap = g;
-    }
-
-    // Pieni lisämarginaali, ettei neliölauta “hipaise” reunoja
+    const gridGap = parseFloat(cs.gap) || 10;
     const extra = 6;
 
-    // Vähennä header+footer + niiden väliset gapit (header-main, main-footer = 2 gapia)
     availH = Math.max(0, availH - headerH - footerH - (gridGap * 2) - extra);
   }
 
-  // Valitse neliölaudan käytettävä sivu
-  const avail = Math.min(availW, availH);
+  // 3) iOS PWA (standalone): pieni pyöristys-/viewport-heitto -> turvavara
+  const isStandalone =
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+    (window.navigator && window.navigator.standalone);
 
-  // Laske cell koko samoin kuin ennen
+  if (isStandalone){
+    availW = Math.max(0, availW - 6);
+    availH = Math.max(0, availH - 4);
+  }
+
+  // 4) Valitse neliölaudan käytettävä sivu
+  const avail = Math.max(0, Math.min(availW, availH));
+
+  // 5) Laske cell täsmälleen boardin kaavalla
   const cell = Math.floor((avail - (gap*7) - (pad*2) - 4) / 8);
 
-  // Clamp: iPhonella sallitaan vähän pienempi minimi, muualla pidetään nykyinen
+  // Clamp kuten ennen
   const minCell = isIphonePortrait ? 28 : 34;
   const maxCell = 74;
 
