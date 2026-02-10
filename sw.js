@@ -1,5 +1,5 @@
 /* offline-minimi */
-const CACHE_NAME = "antivirus-v5";
+const CACHE_NAME = "antivirus-v6";
 const FILES = [
   "./",
   "./index.html",
