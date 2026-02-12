@@ -1,0 +1,915 @@
+'use strict';
+
+/* =========================
+   Shared utilities / viewport fixes
+   ========================= */
+
+function setVH(){
+  const vv = window.visualViewport;
+  const h = vv ? vv.height : window.innerHeight;
+  document.documentElement.style.setProperty("--vh", (h * 0.01) + "px");
+}
+
+function installNoDoubleTapZoom(){
+  let lastTouchEnd = 0;
+  document.addEventListener("touchend", (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd < 300) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive:false });
+}
+
+function registerServiceWorker(){
+  if ("serviceWorker" in navigator){
+    navigator.serviceWorker.register("./sw.js", { scope: "./" }).catch(()=>{});
+  }
+}
+
+(function initApp(){
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", initApp, { once:true });
+    return;
+  }
+
+  setVH();
+  window.addEventListener("resize", setVH);
+  installNoDoubleTapZoom();
+  registerServiceWorker();
+
+    /* =========================
+       Anti-Virus: puzzles + test-mekaniikka
+       ========================= */
+
+    const PUZZLES_URL = "antivirus-puzzles.json";
+    const LS_KEY = "antivirus_play_v1";
+
+    /* --- board rules --- */
+    const W=8, H=8;
+    function onBoard(x,y){ return x>=0 && x<W && y>=0 && y<H; }
+    function isWhite(x,y){ return ((x+y)&1)===0; } // A1 (0,0) valkea
+
+    // Käytössä vain valkeat B–H ja 2–8, plus EXIT A1.
+    function isPlayable(x,y){
+      if (!onBoard(x,y)) return false;
+      if (x===0 && y===0) return true; // EXIT
+      if (y===0) return false;         // rivi 1 pois
+      if (x===0) return false;         // sarake A pois
+      return isWhite(x,y);
+    }
+    function key(x,y){ return `${x},${y}`; }
+
+    /* --- piece defs (lukittu, kuten sovittu) --- */
+    const PIECE_DEFS = {
+      0: { id:0, name:"Punainen",     color:"#ff3b3b", shape:[[0,0],[1,1]] },
+      1: { id:1, name:"Vaaleansin.",  color:"#4ecbff", shape:[[0,0],[1,1]] },
+      2: { id:2, name:"Oranssi",      color:"#ff9f1c", shape:[[0,0],[1,1],[0,2]] },
+      3: { id:3, name:"Pinkki",       color:"#ff7abf", shape:[[0,0],[0,2]] },
+      4: { id:4, name:"Tummanvihreä", color:"#2ecc71", shape:[[0,0],[0,2]] },
+      5: { id:5, name:"Tummansininen",color:"#1f5fbf", shape:[[0,0],[2,0],[4,0]] },
+      6: { id:6, name:"Violetti",     color:"#b06cff", shape:[[0,0],[2,0],[2,2]] },
+      7: { id:7, name:"Lime",         color:"#b7e600", shape:[[0,0],[1,1],[1,3]] },
+      8: { id:8, name:"Keltainen",    color:"#ffd400", shape:[[0,0],[-1,1],[-1,3]] },
+    };
+
+    /* --- rotation: 90° CCW steps, no normalization on board --- */
+    function rotPtCCW(dx, dy, steps){
+      const r = ((steps%4)+4)%4;
+      if (r===0) return [dx, dy];
+      if (r===1) return [-dy, dx];
+      if (r===2) return [-dx, -dy];
+      return [dy, -dx]; // r===3
+    }
+    function rotatedPointsNoNorm(points, rotSteps){
+      return points.map(([dx,dy]) => rotPtCCW(dx,dy,rotSteps));
+    }
+    function pieceCells(piece){
+      const def = PIECE_DEFS[piece.id];
+      const pts = rotatedPointsNoNorm(def.shape, piece.rot|0);
+      return pts.map(([dx,dy]) => ({ x: piece.x0 + dx, y: piece.y0 + dy }));
+    }
+
+    /* --- UI refs --- */
+    const elGame = document.getElementById("game");
+    const elStatus = document.getElementById("status");
+    const elPuzzleSelect = document.getElementById("puzzleSelect");
+    const btnPrev = document.getElementById("btnPrev");
+    const btnNext = document.getElementById("btnNext");
+    const btnReset = document.getElementById("btnReset");
+    const btnExample = document.getElementById("btnExample");
+    const btnHelp = document.getElementById("btnHelp");
+
+    function setStatus(msg, cls="warn"){
+      elStatus.textContent = msg || "";
+      elStatus.className = cls;
+    }
+
+    /* --- mount board --- */
+    function mountBoard(){
+      elGame.innerHTML = `
+        <div id="board">
+          <svg id="diagonalsLayer" style="position:absolute; inset:0; pointer-events:none; width:100%; height:100%;">
+            <g id="diagonals"></g>
+          </svg>
+          <svg id="piecesConnectionLayer" style="position:absolute; inset:0; pointer-events:none; width:100%; height:100%;">
+            <g id="piecesConnections"></g>
+          </svg>
+          <div id="exitTag">EXIT</div>
+          <div id="grid"></div>
+          <div id="hintsLayer"></div>
+          <div id="blocksLayer"></div>
+          <div id="piecesLayer"></div>
+        </div>
+      `;
+      drawDiagonals();
+    }
+
+    function drawDiagonals(){
+      const svg = document.getElementById("diagonals");
+      svg.innerHTML = "";
+      
+      const cell = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell"));
+      const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--gap"));
+      const pad = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--boardPad"));
+      
+      // Diagonaalit neljään suuntaan
+      for (let i = 0; i < 8; i++){
+        for (let j = 0; j < 8; j++){
+          // Näytä vain ruudot joissa on validi peli
+          if (!isPlayable(i,j)) continue;
+          
+          // Käytä ruudukon solun keskipistettä (ilman nappuloiden offsetia)
+          const centerX = pad + i*(cell+gap) + cell/2;
+          const centerY = pad + j*(cell+gap) + cell/2;
+          
+          // Neljä diagonaalia: yläoikea, alaoikea, alavasen, ylävasen
+          const dirs = [
+            {dx: 1, dy: -1},  // yläoikea
+            {dx: 1, dy: 1},   // alaoikea
+            {dx: -1, dy: 1},  // alavasen
+            {dx: -1, dy: -1}  // ylävasen
+          ];
+          
+          for (const dir of dirs){
+            // Piirretään viiva seuraavaan ruutuun
+            const nextI = i + dir.dx;
+            const nextJ = j + dir.dy;
+            
+            if (nextI >= 0 && nextI < 8 && nextJ >= 0 && nextJ < 8 && isPlayable(nextI, nextJ)){
+              const nextCenterX = pad + nextI*(cell+gap) + cell/2;
+              const nextCenterY = pad + nextJ*(cell+gap) + cell/2;
+              
+              // Piirretään viiva
+              const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+              line.setAttribute("x1", centerX);
+              line.setAttribute("y1", centerY);
+              line.setAttribute("x2", nextCenterX);
+              line.setAttribute("y2", nextCenterY);
+              line.setAttribute("stroke", "rgba(255,255,255,0.15)");
+              line.setAttribute("stroke-width", "1.5");
+              line.setAttribute("stroke-dasharray", "3,2");
+              svg.appendChild(line);
+            }
+          }
+        }
+      }
+    }
+
+/* --- responsive cell size --- */
+function rebuildCellSize(){
+  // Kiinteät arvot (pidetään samana)
+  const gap = 8;
+  const pad = 10;
+
+  const appEl = document.getElementById("app");
+  const mainEl = document.querySelector("#app > main");
+  if (!appEl || !mainEl) return;
+
+  // main-alueen sisämitat (tämä on se tila jossa board oikeasti elää)
+  
+  const cs = getComputedStyle(appEl); // ✅ LISÄÄ TÄMÄ
+  const r = mainEl.getBoundingClientRect();
+
+  // iOS/PWA: jätä pieni turvamarginaali
+  let availW = Math.floor(r.width  - 6);
+  let availH = Math.floor(r.height - 6);
+
+  // 2) iPhone portrait: vähennä header+footer (+ #app gapit) samoin kuin ennen
+  const isIphonePortrait = window.matchMedia(
+    "(max-width: 430px) and (orientation: portrait) and (hover:none) and (pointer:coarse)"
+  ).matches;
+
+  if (isIphonePortrait){
+    const headerEl = document.querySelector("#app > header");
+    const footerEl = document.querySelector("#app > footer");
+    const headerH = headerEl ? headerEl.getBoundingClientRect().height : 0;
+    const footerH = footerEl ? footerEl.getBoundingClientRect().height : 0;
+
+    const gridGap = parseFloat(cs.gap) || 10;
+    const extra = 6;
+
+    availH = Math.max(0, availH - headerH - footerH - (gridGap * 2) - extra);
+  }
+
+  // 3) iOS PWA (standalone): pieni pyöristys-/viewport-heitto -> turvavara
+  const isStandalone =
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+    (window.navigator && window.navigator.standalone);
+
+  if (isStandalone){
+    availW = Math.max(0, availW - 6);
+    availH = Math.max(0, availH - 4);
+  }
+
+  // 4) Valitse neliölaudan käytettävä sivu
+  const avail = Math.max(0, Math.min(availW, availH));
+
+  // 5) Laske cell täsmälleen boardin kaavalla
+  const cell = Math.floor((avail - (gap*7) - (pad*2) - 4) / 8);
+
+  // Clamp kuten ennen
+  const minCell = isIphonePortrait ? 28 : 34;
+  const maxCell = 74;
+
+  const clamped = Math.max(minCell, Math.min(maxCell, cell));
+
+  document.documentElement.style.setProperty("--cell", clamped + "px");
+  document.documentElement.style.setProperty("--gap", gap + "px");
+  document.documentElement.style.setProperty("--boardPad", pad + "px");
+
+  drawDiagonals();
+}
+
+    function dotOffset(cell){
+      const scale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dotScale"));
+      return -((scale - 1) / 2) * cell;
+    }
+
+    function xyToPx(x,y){
+      const cell = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell"));
+      const gap  = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--gap"));
+      const pad  = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--boardPad"));
+      const off  = dotOffset(cell);
+      return {
+        left: pad + x*(cell+gap) + off,
+        top:  pad + y*(cell+gap) + off
+      };
+    }
+
+    function buildGrid(){
+      const elGrid = document.getElementById("grid");
+      elGrid.innerHTML = "";
+      for (let y=0; y<H; y++){
+        for (let x=0; x<W; x++){
+          const d = document.createElement("div");
+          d.className = "cell";
+          const off = ((y===0 || x===0) && !(x===0 && y===0));
+          if (off) d.classList.add("off");
+          if (isPlayable(x,y)) d.classList.add("playable");
+          if (x===0 && y===0) d.classList.add("exit");
+
+          d.addEventListener("pointerdown", (ev)=>{
+            ev.preventDefault();
+            if (!isPlayable(x,y)) return;
+            onCellClick(x,y);
+          });
+
+          elGrid.appendChild(d);
+        }
+      }
+    }
+
+    /* --- puzzles state --- */
+    let puzzles = [];
+    let fileCurrent = 0;   // "current" jsonista
+    let current = 0;
+
+    let basePuzzle = null;
+    let blocks = [];
+    let pieces = [];
+
+    // selection + hints
+    let selectedId = null;
+    let selectedMoves = [];
+    let previewGroupIds = null; // Set of ids for the currently previewed group-move (drag/click)
+
+    function deepClone(o){ return JSON.parse(JSON.stringify(o)); }
+
+    function loadLocal(){
+      try{
+        const raw = localStorage.getItem(LS_KEY);
+        return raw ? JSON.parse(raw) : null;
+      }catch(e){ return null; }
+    }
+    function saveLocal(){
+      try{
+        localStorage.setItem(LS_KEY, JSON.stringify({ current }));
+      }catch(e){}
+    }
+
+    async function loadPuzzlesAuto(){
+      const res = await fetch(PUZZLES_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+
+      const obj = await res.json();
+      if (!obj || !Array.isArray(obj.puzzles) || obj.puzzles.length===0) throw new Error("Virheellinen antivirus-puzzles.json");
+
+      puzzles = obj.puzzles;
+      fileCurrent = Math.max(0, Math.min((obj.current|0), puzzles.length-1));
+
+      const loc = loadLocal();
+      if (loc && Number.isFinite(loc.current)){
+        current = Math.max(0, Math.min((loc.current|0), puzzles.length-1));
+      }else{
+        current = fileCurrent;
+      }
+    }
+
+    function renderPuzzleSelect(){
+      elPuzzleSelect.innerHTML = "";
+      puzzles.forEach((p,i)=>{
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent = `${i+1}. ${p.name || "Pulma"}`;
+        elPuzzleSelect.appendChild(opt);
+      });
+      elPuzzleSelect.value = String(current);
+    }
+
+    function applyPuzzle(idx){
+      current = Math.max(0, Math.min(idx|0, puzzles.length-1));
+      const pz = puzzles[current];
+
+      basePuzzle = deepClone(pz);
+      blocks = deepClone(pz.blocks || []);
+      pieces = deepClone(pz.pieces || []);
+
+      selectedId = null;
+      selectedMoves = [];
+
+      elPuzzleSelect.value = String(current);
+      saveLocal();
+
+      renderAll();
+      setStatus(`${pz.name || ("Pulma " + (current+1))} (${current+1}/${puzzles.length})`, "warn");
+    }
+
+    function resetPuzzle(){
+      if (!basePuzzle) return;
+      blocks = deepClone(basePuzzle.blocks || []);
+      pieces = deepClone(basePuzzle.pieces || []);
+      selectedId = null;
+      selectedMoves = [];
+      renderAll();
+      setStatus("Reset.", "warn");
+    }
+
+    /* --- occupancy --- */
+    function buildOccMap(exceptId=null){
+      const occ = new Map();
+
+      // walls = all non-playable
+      for (let y=0; y<H; y++){
+        for (let x=0; x<W; x++){
+          if (!isPlayable(x,y)) occ.set(key(x,y), "#");
+        }
+      }
+
+      // blocks
+      for (const b of blocks){
+        occ.set(key(b.x,b.y), "B");
+      }
+
+      // pieces
+      for (const p of pieces){
+        if (exceptId!==null && p.id===exceptId) continue;
+        for (const c of pieceCells(p)){
+          occ.set(key(c.x,c.y), p.id);
+        }
+      }
+
+      return occ;
+    }
+
+    /* --- test movement: diagonal slide, can stop at any free anchor along diagonal --- */
+    const DIRS = [
+      {dx: 1, dy: 1,  arrow:"↘"},
+      {dx: 1, dy:-1, arrow:"↗"},
+      {dx:-1, dy: 1, arrow:"↙"},
+      {dx:-1, dy:-1,arrow:"↖"},
+    ];
+
+    function computeMovesForPiece(id){
+      const p0 = pieces.find(pp=>pp.id===id);
+      if (!p0) return [];
+
+      const out = [];
+
+      function cellsAt(p, dx, dy){
+        return pieceCells({ id:p.id, rot:p.rot, x0:p.x0+dx, y0:p.y0+dy });
+      }
+
+      function buildOccExcluding(group){
+        const occ = new Map();
+        for (const b of blocks){
+          occ.set(key(b.x,b.y), "B");
+        }
+        for (const p of pieces){
+          if (group.has(p.id)) continue;
+          for (const c of pieceCells(p)){
+            occ.set(key(c.x,c.y), p.id);
+          }
+        }
+        return occ;
+      }
+
+      for (const dir of DIRS){
+        let step = 1;
+        while (true){
+          const dx = dir.dx * step;
+          const dy = dir.dy * step;
+
+          const group = new Set([id]);
+          let changed = true;
+          let blocked = false;
+
+          while (changed){
+            changed = false;
+            const occ = buildOccExcluding(group);
+
+            for (const pid of Array.from(group)){
+              const p = pieces.find(pp=>pp.id===pid);
+              for (const c of cellsAt(p, dx, dy)){
+                if (!onBoard(c.x,c.y) || !isPlayable(c.x,c.y)){
+                  blocked = true; break;
+                }
+                const o = occ.get(key(c.x,c.y));
+                if (o!==undefined){
+                  if (o==="B"){
+                    blocked = true; break;
+                  }
+                  // collision with another piece -> add to group
+                  if (!group.has(o)){
+                    group.add(o);
+                    changed = true;
+                  }
+                }
+              }
+              if (blocked) break;
+            }
+            if (blocked) break;
+          }
+
+          if (blocked) break;
+
+          // also ensure no overlaps within group after move
+          const seen = new Set();
+          for (const pid of group){
+            const p = pieces.find(pp=>pp.id===pid);
+            for (const c of cellsAt(p, dx, dy)){
+              const k = key(c.x,c.y);
+              if (seen.has(k)){
+                blocked = true; break;
+              }
+              seen.add(k);
+            }
+            if (blocked) break;
+          }
+          if (blocked) break;
+
+          out.push({
+            x0: p0.x0 + dx,
+            y0: p0.y0 + dy,
+            kind: "group",
+            arrow: dir.arrow,
+            group: Array.from(group).map(pid=>{
+              const p = pieces.find(pp=>pp.id===pid);
+              return { id:pid, x0:p.x0+dx, y0:p.y0+dy };
+            })
+          });
+
+          step++;
+        }
+      }
+
+      // Prefer moves with larger groups for same destination
+      const best = new Map();
+      for (const m of out){
+        const k = m.x0 + "," + m.y0;
+        const prev = best.get(k);
+        if (!prev || m.group.length > prev.group.length){
+          best.set(k, m);
+        }
+      }
+      return Array.from(best.values());
+    }
+
+    function selectPiece(id){
+      selectedId = id;
+      selectedMoves = computeMovesForPiece(id);
+      previewGroupIds = null;
+      renderAll();
+    }
+
+    
+    function setPreviewGroupFromMove(move){
+      if (move && move.kind==="group" && Array.isArray(move.group)){
+        previewGroupIds = new Set(move.group.map(g=>g.id));
+      }else{
+        previewGroupIds = null;
+      }
+    }
+
+    function applyMove(move){
+      if (move && move.kind==="group" && Array.isArray(move.group)){
+        for (const g of move.group){
+          const i = pieces.findIndex(pp=>pp.id===g.id);
+          if (i>=0){
+            pieces[i].x0 = g.x0;
+            pieces[i].y0 = g.y0;
+          }
+        }
+      }else if (move){
+        const i = pieces.findIndex(pp=>pp.id===selectedId);
+        if (i>=0){
+          pieces[i].x0 = move.x0;
+          pieces[i].y0 = move.y0;
+        }
+      }
+    }
+
+function clearSelection(){
+      selectedId = null;
+      selectedMoves = [];
+      previewGroupIds = null;
+      renderAll();
+    }
+
+    function onCellClick(x,y){
+      if (selectedId===null) return;
+
+      const target = selectedMoves.find(m => m.x0===x && m.y0===y);
+      if (!target) return;
+
+      setPreviewGroupFromMove(target);
+      applyMove(target);
+
+      selectedMoves = computeMovesForPiece(selectedId);
+      previewGroupIds = null;
+
+      if (checkWin()){
+        setStatus("Ratkaistu!", "ok");
+      }else{
+        setStatus(`${puzzles[current]?.name || ("Pulma " + (current+1))} (${current+1}/${puzzles.length})`, "warn");
+      }
+
+      renderAll();
+    }
+
+    function checkWin(){
+
+      const red = pieces.find(p=>p.id===0);
+      if (!red) return false;
+      return pieceCells(red).some(c => c.x===0 && c.y===0);
+    }
+
+    /* --- render --- */
+    function renderHints(){
+      const el = document.getElementById("hintsLayer");
+      el.innerHTML = "";
+      // Vihjeympyrät poistettu
+    }
+
+    function renderBlocks(){
+      const el = document.getElementById("blocksLayer");
+      el.innerHTML = "";
+      for (const b of blocks){
+        const pos = xyToPx(b.x,b.y);
+        const d = document.createElement("div");
+        d.className = "dot blockDot";
+        d.style.left = pos.left + "px";
+        d.style.top  = pos.top  + "px";
+        el.appendChild(d);
+      }
+    }
+
+let dragState = {
+  active: false,
+  startX: 0,
+  startY: 0,
+  pieceId: null,
+  initialX0: null,
+  initialY0: null,
+  stepPx: null,
+
+  // cache + throttling
+  moves: null,
+  lastGridX: 0,
+  lastGridY: 0,
+
+  // ketjutukseen:
+  lastCommitX0: null,
+  lastCommitY0: null
+};
+
+    function drawPieceConnections(){
+      const svg = document.getElementById("piecesConnections");
+      svg.innerHTML = "";
+      
+      // Käy läpi kaikki nappulat
+      for (const p of pieces){
+        const def = PIECE_DEFS[p.id];
+        const cells = pieceCells(p);
+        
+        // Jos nappula koostuu vain yhdestä solusta, ei tarvitse yhdistää
+        if (cells.length <= 1) continue;
+        
+        // Yhdistä nappulan solut viivalla
+        for (let i = 0; i < cells.length - 1; i++){
+          const c1 = cells[i];
+          const c2 = cells[i + 1];
+          
+          const pos1 = xyToPx(c1.x, c1.y);
+          const pos2 = xyToPx(c2.x, c2.y);
+          
+          // Nappuloiden keskipisteet
+          const cell = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell"));
+          const scale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dotScale"));
+          const x1 = pos1.left + (cell * scale) / 2;
+          const y1 = pos1.top + (cell * scale) / 2;
+          const x2 = pos2.left + (cell * scale) / 2;
+          const y2 = pos2.top + (cell * scale) / 2;
+          
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("x1", x1);
+          line.setAttribute("y1", y1);
+          line.setAttribute("x2", x2);
+          line.setAttribute("y2", y2);
+          line.setAttribute("stroke", def.color);
+          line.setAttribute("stroke-width", "36");
+          line.setAttribute("stroke-linecap", "round");
+          line.setAttribute("opacity", "0.7");
+          svg.appendChild(line);
+        }
+      }
+    }
+
+function renderPieces(){
+  const el = document.getElementById("piecesLayer");
+  el.innerHTML = "";
+
+  for (const p of pieces){
+    const def = PIECE_DEFS[p.id];
+    const cells = pieceCells(p);
+
+    for (const c of cells){
+      const pos = xyToPx(c.x, c.y);
+
+      const d = document.createElement("div");
+      d.className =
+        "dot pieceDot" +
+        (p.id === selectedId ? " selected" : "") +
+        (previewGroupIds && previewGroupIds.has(p.id) && p.id !== selectedId ? " grouped" : "");
+
+      d.style.left = pos.left + "px";
+      d.style.top  = pos.top  + "px";
+      d.style.background = def.color;
+      d.dataset.pid = String(p.id);
+
+d.addEventListener("pointerdown", (ev) => {
+  ev.preventDefault();
+  try { d.setPointerCapture(ev.pointerId); } catch (e) {}
+
+  const pid = parseInt(d.dataset.pid, 10);
+
+  dragState.active = true;
+  dragState.startX = ev.clientX;
+  dragState.startY = ev.clientY;
+  dragState.pieceId = pid;
+
+  const piece = pieces.find(pp => pp.id === pid);
+  if (piece){
+    dragState.initialX0 = piece.x0;
+    dragState.initialY0 = piece.y0;
+    dragState.lastCommitX0 = piece.x0;
+    dragState.lastCommitY0 = piece.y0;
+  }
+
+  const rootCS = getComputedStyle(document.documentElement);
+  const cell = parseFloat(rootCS.getPropertyValue("--cell")) || 56;
+  const gap  = parseFloat(rootCS.getPropertyValue("--gap"))  || 8;
+  dragState.stepPx = cell + gap;
+
+  // lasketaan siirrot aloitusankkurista
+  dragState.moves = computeMovesForPiece(pid);
+
+  dragState.lastGridX = 0;
+  dragState.lastGridY = 0;
+
+  d.classList.add("dragging");
+
+  if (selectedId === pid) clearSelection();
+  else selectPiece(pid);
+});
+
+      el.appendChild(d);
+    }
+  }
+}
+
+    function renderAll(){
+      renderHints();
+      renderBlocks();
+      drawPieceConnections();
+      renderPieces();
+    }
+
+document.addEventListener("pointermove", (ev) => {
+  if (!dragState.active) return;
+
+  const pid = dragState.pieceId;
+  const piece = pieces.find(pp => pp.id === pid);
+  if (!piece) return;
+
+  const step = dragState.stepPx || (() => {
+    const rootCS = getComputedStyle(document.documentElement);
+    const cell = parseFloat(rootCS.getPropertyValue("--cell")) || 56;
+    const gap  = parseFloat(rootCS.getPropertyValue("--gap"))  || 8;
+    return cell + gap;
+  })();
+
+  // dx/dy nykyisestä ankkurista
+  const dx = ev.clientX - dragState.startX;
+  const dy = ev.clientY - dragState.startY;
+
+  // pieni dead zone
+  const DEAD = 6;
+  if (Math.abs(dx) < DEAD && Math.abs(dy) < DEAD) return;
+
+  // Valitse diagonaalisuunta nykyisen liikkeen perusteella
+  // sx = oikea/vasen, sy määräytyy diagonaalista
+  const sx = (dx >= 0) ? 1 : -1;
+  const sameSign = (dx >= 0) === (dy >= 0); // true => ↘/↖, false => ↗/↙
+  const sy = sameSign ? sx : -sx;
+
+  // Projektoi liike valitulle diagonaalille:
+  // t kasvaa kun liikut samaan suuntaan (sx,sy)
+  const t = (dx * sx + dy * sy) / 2;
+
+  // Kuinka monta "askelta" diagonaalia pitkin?
+  // Käytetään trunc -> ei laukea ennen kuin oikeasti ylitetään step.
+const THRESH = 0.75; // ← säädä tätä
+let steps = Math.trunc(t / (step * THRESH));
+
+  if (steps === 0) return;
+
+  // Ketjutus hallituksi: yksi askel kerrallaan
+  steps = steps > 0 ? 1 : -1;
+
+  const newX0 = dragState.initialX0 + sx * steps;
+  const newY0 = dragState.initialY0 + sy * steps;
+
+  // Käytä nykyisen ankkurin move-listaa
+  const moves = dragState.moves || computeMovesForPiece(pid);
+  const validMove = moves.find(m => m.x0 === newX0 && m.y0 === newY0);
+  if (!validMove) {
+    previewGroupIds = null;
+    return;
+  }
+
+  // Commit + preview
+  setPreviewGroupFromMove(validMove);
+  applyMove(validMove);
+  renderAll();
+
+  // ✅ TÄRKEÄ: päivitä ankkuri "ruudukon mukaan", ei sormen mukaan
+  dragState.initialX0 = newX0;
+  dragState.initialY0 = newY0;
+
+  // siirrä sormen ankkuria täsmälleen yksi askel samaan suuntaan
+  dragState.startX += sx * steps * step;
+  dragState.startY += sy * steps * step;
+
+  // laske uusi move-lista uudesta tilanteesta (vain commitin jälkeen)
+  dragState.moves = computeMovesForPiece(pid);
+
+  // nollaa ruutumuisturit jos sinulla on ne
+  dragState.lastGridX = 0;
+  dragState.lastGridY = 0;
+});
+
+document.addEventListener("pointerup", (ev) => {
+  if (!dragState.active) {
+    dragState.active = false;
+    return;
+  }
+
+  dragState.active = false;
+
+  document.querySelectorAll(".pieceDot.dragging")
+    .forEach(el => el.classList.remove("dragging"));
+
+  try { document.releasePointerCapture?.(ev.pointerId); } catch (e) {}
+
+  if (dragState.pieceId != null) {
+    selectedMoves = computeMovesForPiece(dragState.pieceId);
+  }
+
+  if (checkWin()){
+    setStatus("Ratkaistu!", "ok");
+  }else{
+    setStatus(`${puzzles[current]?.name || ("Pulma " + (current+1))} (${current+1}/${puzzles.length})`, "warn");
+  }
+
+  previewGroupIds = null;
+  dragState.moves = null;
+
+  renderAll();
+});
+
+    /* --- controls --- */
+    btnPrev.addEventListener("click", ()=>{
+      if (!puzzles.length) return;
+      applyPuzzle((current - 1 + puzzles.length) % puzzles.length);
+    });
+
+    btnNext.addEventListener("click", ()=>{
+      if (!puzzles.length) return;
+      applyPuzzle((current + 1) % puzzles.length);
+    });
+
+    elPuzzleSelect.addEventListener("change", ()=>{
+      const idx = parseInt(elPuzzleSelect.value, 10);
+      if (!Number.isFinite(idx)) return;
+      applyPuzzle(idx);
+    });
+
+    btnReset.addEventListener("click", resetPuzzle);
+
+    btnExample.addEventListener("click", ()=>{
+      if (!puzzles.length) return;
+      applyPuzzle(fileCurrent || 0);
+    });
+
+    btnHelp.addEventListener("click", ()=>{
+      alert(
+        "Siirrä paloja niin, että voit ohjata punaisen viruksen pois solusta.\n\n" +
+        "Valitse pala klikkaamalla ja siirrä diagonaalisesti.\n\n" +
+		"Valkoista palaa ei voi liikuttaa.\n\n" +
+        "Ratkaisu: punainen pala peittää EXIT-ruudun."
+      );
+    });
+
+    window.addEventListener("keydown", (e)=>{
+      if (!puzzles.length) return;
+      if (e.key === "ArrowLeft")  applyPuzzle((current - 1 + puzzles.length) % puzzles.length);
+      if (e.key === "ArrowRight") applyPuzzle((current + 1) % puzzles.length);
+      if (e.key === "r" || e.key === "R") resetPuzzle();
+    });
+
+    /* --- init --- */
+(async function init(){
+  mountBoard();
+  buildGrid();
+
+  // 🔴 iPadOS PWA viewport-fix
+  function forceRelayout(){
+    setVH();
+    rebuildCellSize();
+    renderAll();
+  }
+
+  // 1️⃣ heti
+  forceRelayout();
+
+  // 2️⃣ seuraava frame
+  requestAnimationFrame(forceRelayout);
+
+  // 3️⃣ iPadOS-korjausviiveet
+  setTimeout(forceRelayout, 60);
+  setTimeout(forceRelayout, 250);
+
+  // 4️⃣ PWA: kun appi aktivoituu näkyväksi
+  window.addEventListener("pageshow", forceRelayout);
+
+  // 5️⃣ orientaatio
+  window.addEventListener("orientationchange", ()=>{
+    setTimeout(forceRelayout, 200);
+  });
+
+  // normaali resize
+  window.addEventListener("resize", forceRelayout);
+
+  try{
+    await loadPuzzlesAuto();
+    renderPuzzleSelect();
+    applyPuzzle(current);
+  }catch(e){
+    setStatus("Ei ladattu antivirus-puzzles.json: " + (e?.message || "virhe"), "bad");
+    puzzles = [];
+    elPuzzleSelect.innerHTML = "";
+  }
+})();
+
+  
+
+})();
