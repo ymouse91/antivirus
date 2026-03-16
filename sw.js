@@ -1,10 +1,12 @@
 /* offline-minimi */
-const CACHE_NAME = "antivirus-v6";
+const CACHE_NAME = "antivirus-v7";
 const FILES = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icon192.png",
+  "./styles.css",
+  "./app.js",
   "./antivirus-puzzles.json"
 ];
 
